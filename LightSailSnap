@@ -1,0 +1,63 @@
+import boto3
+import uuid
+from datetime import datetime, timedelta, timezone
+
+def lambda_handler(event, context):
+    # Create a boto3 client for Lightsail
+    region = ["us-east-1", "us-west-2"]
+    for x in region:
+        client = boto3.client('lightsail', region_name=x)
+        # Use the get_instances method to retrieve all instances
+        try:
+            instances = client.get_instances()
+        except Exception as e:
+            print(f"Failed to retrieve instances: {e}")
+            return
+
+        for instance in instances['instances']:
+            # Check if the instance has the "backups.enabled" tag set to "true"
+            backups_enabled = False
+            retention_period = 7
+            for tag in instance['tags']:
+                if tag['key'] == 'backups.enabled' and tag['value'] == 'true':
+                    backups_enabled = True
+                if tag['key'] == 'backup.retention':
+                    retention_period = int(tag['value'])
+                    
+            if backups_enabled:
+                instance_name = [instance['name']]
+                now = datetime.utcnow().strftime("%Y-%m-%d-%H-%M-%S")
+                for name in instance_name:
+                    if not name:
+                        break
+                    snapshot_name = name + '-' + str(uuid.uuid4())
+                    try:
+                        response = client.create_instance_snapshot(instanceName=name, instanceSnapshotName=snapshot_name)
+                    except Exception as e:
+                        print(f"Failed to create snapshot for instance {name}: {e}")
+                        continue
+                    print(snapshot_name)
+            if backups_enabled:
+                instance_name = instance['name']
+                now = datetime.utcnow().strftime("%Y-%m-%d-%H-%M-%S")
+                snapshots = []
+                next_token = None
+                while True:
+                    if next_token:
+                        response = client.get_instance_snapshots(pageToken=next_token)
+                    else:
+                        response = client.get_instance_snapshots()
+                    snapshots += response['instanceSnapshots']
+                    if 'nextPageToken' in response:
+                        next_token = response['nextPageToken']
+                    else:
+                        break
+                for snapshot in snapshots:
+                    if snapshot['fromInstanceName'] == instance_name:
+                        # check the date of the snapshot
+                        snapshot_date = snapshot['createdAt'].date()
+                        # check if the snapshot is older than the retention period
+                        if (datetime.now().date() - snapshot_date).days > retention_period:
+                            # delete the snapshot
+                            client.delete_instance_snapshot(instanceSnapshotName=snapshot['name'])
+                            print(f'Snapshot {snapshot["name"]} deleted')
